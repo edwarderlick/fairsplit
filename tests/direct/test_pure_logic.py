@@ -25,6 +25,8 @@ _PURE_FUNCS = {
     "_derive_outcome",
     "_normalize_to_bp",
     "_equal_split_bp",
+    "_compute_payout_amounts",
+    "_settle_from_rounds",
 }
 _PURE_CONSTS = {"MIN_CITATION_LEN", "MAX_JUSTIFICATION_LEN", "TOLERANCE_POINTS"}
 
@@ -194,3 +196,39 @@ def test_recompute_matches_derive_outcome_given_same_raw_samples():
     bp1 = fairsplit._normalize_to_bp(split1)
     bp2 = fairsplit._normalize_to_bp(split2)
     assert bp1 == bp2
+
+
+# ------------------------------------------------------- payout dust fix
+
+
+def test_compute_payout_amounts_sums_to_exactly_pool_despite_floor_division():
+    """The nit this guards against: naive `(pool * bp) // 10000` per
+    contributor can lose a few units of `pool` to rounding even though the
+    bp values sum to exactly 10000. This asserts the fixed helper never
+    loses any of it."""
+    addrs = ["alice", "bob"]
+    bp_map = {"alice": 6700, "bob": 3300}
+    # pool=3: alice floor(3*6700/10000)=2, bob floor(3*3300/10000)=0 -> sums
+    # to 2, losing 1 of the 3 to rounding under naive floor division.
+    amounts = fairsplit._compute_payout_amounts(3, addrs, bp_map, 0, 10000)
+    assert sum(amounts.values()) == 3
+    # The lost unit goes to the larger bp holder (alice), not bob.
+    assert amounts["alice"] == 3
+    assert amounts["bob"] == 0
+
+
+def test_compute_payout_amounts_handles_larger_pools_and_three_way_splits():
+    addrs = ["alice", "bob", "carol"]
+    bp_map = fairsplit._normalize_to_bp({"alice": 33, "bob": 33, "carol": 34})
+    assert sum(bp_map.values()) == 10000
+    for pool in (1, 7, 100, 999_999_999_999_999_999):
+        amounts = fairsplit._compute_payout_amounts(pool, addrs, bp_map, 0, 10000)
+        assert sum(amounts.values()) == pool
+
+
+def test_compute_payout_amounts_no_dust_when_evenly_divisible():
+    addrs = ["alice", "bob"]
+    bp_map = {"alice": 5000, "bob": 5000}
+    amounts = fairsplit._compute_payout_amounts(10000, addrs, bp_map, 0, 10000)
+    assert amounts == {"alice": 5000, "bob": 5000}
+    assert sum(amounts.values()) == 10000

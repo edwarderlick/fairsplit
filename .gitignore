@@ -4,3 +4,4 @@ __pycache__/
 .gltest_cache/
 artifacts/
 .env
+.claude/

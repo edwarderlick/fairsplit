@@ -23,8 +23,25 @@ MIN_CONTRIBUTORS = 2
 MAX_CONTRIBUTORS = 8
 MIN_SUBMISSION_LEN = 20
 MAX_SUBMISSION_LEN = 2000
-MIN_CITATION_LEN = 8
+MIN_CITATION_LEN = 8  # deliberately NOT raised further -- see note below
 MAX_JUSTIFICATION_LEN = 300
+
+# On MIN_CITATION_LEN specifically: this length check exists only to reject
+# single-word/trivial matches, not to guarantee a citation is SUBSTANTIVE.
+# `_validate_citation`'s actual job -- and the only thing it can honestly
+# claim to prove -- is that the excerpt is REAL: a verbatim, unforged
+# substring of that specific contributor's own submission (the
+# ProofReader-lesson property). No fixed length threshold can additionally
+# guarantee the excerpt is *meaningful*: a contributor could pad their own
+# submission with any filler text of exactly that length, and an excerpt
+# threshold can't distinguish that from a legitimately short, meaningful
+# quote (e.g. "fixed typos" at 11 chars, used in this contract's own
+# tests, is a real, short, perfectly legitimate citation). Solving that
+# would require judging semantic substance, which means trusting another
+# LLM call -- reintroducing exactly the kind of unverifiable trust this
+# check exists to avoid. So this constant is left at a modest 8 (filters
+# out near-empty matches) rather than raised further to chase a form of
+# gaming it structurally cannot close.
 
 SAMPLES_PER_ROUND = 3       # independent LLM reads sampled per round
 MAX_ROUNDS = 2               # bounded re-run policy on non-convergence
@@ -118,7 +135,19 @@ def _parse_sample_response(parsed, addrs, submissions):
         }
         total += pct
 
-    if total < 60 or total > 140:
+    # Sanity bound on the reported total, not a strict requirement: this
+    # is purely to catch a genuinely broken/incomplete LLM response (e.g.
+    # it forgot a contributor, or hallucinated a garbage number) before it
+    # can be silently rescaled by `_normalize_to_bp` into something that
+    # looks plausible but doesn't reflect what the model actually meant.
+    # `_normalize_to_bp` rescales proportionally regardless of the total,
+    # so correctness never depends on the total being exactly 100 -- this
+    # is deliberately tight (+-10, not the far looser +-40 an earlier
+    # version of this contract used) because with whole-integer
+    # percentages and at most MAX_CONTRIBUTORS=8 contributors, honest
+    # per-contributor rounding drift is at most a few points; a total
+    # outside +-10 is a sign of a broken response, not benign rounding.
+    if total < 90 or total > 110:
         raise ValueError(f"split total {total} too far from 100")
     return entries
 
@@ -172,6 +201,41 @@ def _equal_split_bp(addrs):
     out = {a: base for a in addrs}
     out[addrs[0]] += 10000 - base * n
     return out
+
+
+def _compute_payout_amounts(pool, addrs, bp_map, zero, ten_thousand):
+    """Splits `pool` across `addrs` according to `bp_map` (basis points,
+    assumed to sum to 10000). Per-contributor floor division
+    (`pool * bp // 10000`) can lose up to `len(addrs) - 1` units of `pool`
+    to rounding; rather than leaving that dust permanently stranded in the
+    contract, it's paid to whichever contributor holds the largest bp
+    share. `sum(amounts.values()) == pool` exactly whenever `bp_map`'s
+    values actually sum to 10000.
+
+    `zero`/`ten_thousand` are passed in (rather than constructed with
+    `u256(...)` inside this function) so this function has no dependency
+    on the GenVM SDK and can be unit tested directly in plain Python --
+    see tests/direct/test_pure_logic.py::test_compute_payout_amounts_*."""
+    amounts = {}
+    total_paid = zero
+    for a in addrs:
+        bp = bp_map.get(a, zero)
+        amount = (pool * bp) // ten_thousand
+        amounts[a] = amount
+        total_paid = total_paid + amount
+
+    dust = pool - total_paid
+    if dust > zero and addrs:
+        largest = addrs[0]
+        largest_bp = bp_map.get(largest, zero)
+        for a in addrs[1:]:
+            bp = bp_map.get(a, zero)
+            if bp > largest_bp:
+                largest = a
+                largest_bp = bp
+        amounts[largest] = amounts[largest] + dust
+
+    return amounts
 
 
 def _settle_from_rounds(rounds, addrs):
@@ -486,17 +550,32 @@ class FairSplit(gl.Contract):
                 own = _run_rounds(addrs, submissions_map)
             except Exception:
                 return False
-            if own.get("outcome") != leader_data.get("outcome"):
+
+            # Compare what would ACTUALLY get paid on each side -- derived
+            # from `rounds` via `_settle_from_rounds`, the exact same
+            # function `start_estimation` uses to settle -- rather than a
+            # separately-reported `outcome`/`split_pct` shortcut. A leader
+            # could report an `outcome`/`split_pct` that looks honest (and
+            # would pass a check against the validator's own `split_pct`)
+            # while shipping fabricated `rounds` that derive to a
+            # materially different, self-serving payout, since it's
+            # `rounds` -- not `split_pct` -- that actually gets paid. See
+            # tests/direct/test_validator_rounds_gap.py for the
+            # adversarial proof this closes.
+            leader_outcome, leader_bp = _settle_from_rounds(leader_data.get("rounds", []), addrs)
+            own_outcome, own_bp = _settle_from_rounds(own.get("rounds", []), addrs)
+
+            if leader_outcome != own_outcome:
                 return False
-            if own["outcome"] == "CONVERGED":
-                leader_split = leader_data.get("split_pct") or {}
-                own_split = own.get("split_pct") or {}
+            if leader_outcome == "CONVERGED":
                 for a in addrs:
-                    lp = leader_split.get(a)
-                    op = own_split.get(a)
+                    lp = leader_bp.get(a)
+                    op = own_bp.get(a)
                     if lp is None or op is None:
                         return False
-                    if abs(float(lp) - float(op)) > TOLERANCE_POINTS:
+                    # TOLERANCE_POINTS is in whole percentage points (0-100);
+                    # leader_bp/own_bp are in basis points (0-10000).
+                    if abs(lp - op) > TOLERANCE_POINTS * 100:
                         return False
             return True
 
@@ -520,9 +599,16 @@ class FairSplit(gl.Contract):
 
     def _distribute(self) -> None:
         pool = self.pool_balance
-        for a in self._submitted_addrs():
-            bp = self.settled_split_bp.get(a, u256(0))
-            amount = (pool * bp) // u256(10000)
+        addrs = self._submitted_addrs()
+        bp_map = {a: self.settled_split_bp.get(a, u256(0)) for a in addrs}
+        # `settled_split_bp` values sum to exactly 10000 by construction
+        # (`_normalize_to_bp` / `_equal_split_bp`); `_compute_payout_amounts`
+        # ensures no wei of `pool` is lost to per-contributor floor-division
+        # rounding -- see its docstring.
+        amounts = _compute_payout_amounts(pool, addrs, bp_map, u256(0), u256(10000))
+
+        for a in addrs:
+            amount = amounts[a]
             if amount > u256(0):
                 _Recipient(a).emit_transfer(value=amount, on="finalized")
         self.paid = True

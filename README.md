@@ -10,9 +10,11 @@ out proportionally.
 No frontend. Contract and tests only.
 
 **Current live deployment (studio.genlayer.com):**
-`0x050baF2ca5E0Be18B8e0923AE89cB809f5eF642C` -- the fixed contract, after
-the single-source-of-truth hardening described below; see
-[Redeployed and reconfirmed live after the fix](#redeployed-and-reconfirmed-live-after-the-fix).
+`0x3A8F50633228632EEfD42562aA5257828cA9FE5C` -- the fully corrected
+contract, after both the single-source-of-truth hardening and the
+validator rounds-comparison fix described below; see
+[Adversarial hardening](#adversarial-hardening-single-source-of-truth) and
+[Redeployed and reconfirmed live after the fix](#redeployed-and-reconfirmed-live-after-the-fix-round-2).
 
 ## Why this is a different problem from a boolean/structured consensus
 
@@ -269,9 +271,9 @@ transactions and keeps to a small number of full round-trips.
 
 ## Real test results
 
-**Direct-mode suite: 34/34 passing** (`pytest tests/direct -v`), covering:
+**Direct-mode suite: 39/39 passing** (`pytest tests/direct -v`), covering:
 
-- pure convergence/citation/apportionment math (`test_pure_logic.py`)
+- pure convergence/citation/apportionment/payout math (`test_pure_logic.py`)
 - the full CONVERGED and NO_CONSENSUS state-machine paths via controlled
   mocked LLM responses per internal sample (`test_lifecycle.py`)
 - explicit validator accept/reject/outcome-mismatch behavior
@@ -281,40 +283,54 @@ transactions and keeps to a small number of full round-trips.
   (`test_single_source_of_truth.py`) -- a byzantine-leader simulation that
   forces `_run_rounds` to return a `split_pct` that lies about what its own
   `rounds` data supports, and confirms the contract only ever stores what
-  the raw rounds actually derive to; see
-  [Adversarial hardening: single source of truth](#adversarial-hardening-single-source-of-truth)
-  below for the full story, including a real bug this testing found and fixed.
+  the raw rounds actually derive to.
+- **adversarial proof of the validator rounds-comparison fix**
+  (`test_validator_rounds_gap.py`) -- a byzantine leader with an
+  honest-looking `split_pct` but fabricated `rounds`, confirmed to be
+  correctly rejected by `validator_fn` post-fix (and confirmed to have
+  been incorrectly accepted pre-fix, before being fixed).
 - **adversarial proof of citation verification**
   (`test_adversarial_citations.py`) -- all three forgery strategies
   (fabricated text, text borrowed from a different contributor, text lifted
   from something nobody ever submitted) are confirmed rejected before
   persistence, individually and mixed in with genuine samples.
 
+See [Adversarial hardening: single source of truth](#adversarial-hardening-single-source-of-truth)
+and [Adversarial hardening: validator rounds-comparison gap](#adversarial-hardening-validator-rounds-comparison-gap)
+below for the full story of two real bugs this adversarial testing found
+and fixed -- with real failing-then-passing assertions, not just redesigns.
+
 **Live deploys on studio.genlayer.com** (`FairSplit`, 2 contributors, real
-consensus, real value transfer, no mocks) -- five independent live runs
-across two contract versions:
+consensus, real value transfer, no mocks) -- six independent live runs
+across three contract generations:
 
-**Current, fixed contract -- `0x050baF2ca5E0Be18B8e0923AE89cB809f5eF642C`**
-(post single-source-of-truth fix; see
-[Adversarial hardening](#adversarial-hardening-single-source-of-truth) and
-[Redeployed and reconfirmed live after the fix](#redeployed-and-reconfirmed-live-after-the-fix)
-above -- this is the address that reflects the actual submitted contract):
+**Current, fully corrected contract -- `0x3A8F50633228632EEfD42562aA5257828cA9FE5C`**
+(post single-source-of-truth fix AND post validator rounds-comparison fix
+-- this is the address that reflects the actual submitted contract):
 
-- **Unequal, evidenced case, redeployed and reconfirmed on the fixed
-  contract.** Alice submitted a documentation-only contribution; Bob
-  submitted a from-scratch implementation with tests. All 3 independent
-  LLM reads in round 0 agreed exactly (Alice: 15/15/15, Bob: 85/85/85) --
-  the contract settled `CONVERGED` with a genuinely unequal, evidenced
-  **15% / 85%** split, every stored justification's excerpt verified
-  against the real submitted text, and `pay_out()` moved the contract to
-  `PAID`. `recompute_settlement()`, called against this live deployed
-  contract (running the fixed code), reproduced `{alice: 1500, bob: 8500}`
-  exactly, matching `settled_split_bp` on-chain.
+- **Unequal, evidenced case, redeployed and reconfirmed on the fully
+  corrected contract.** Alice submitted a documentation-only contribution;
+  Bob submitted a from-scratch implementation with tests. All 3
+  independent LLM reads in round 0 agreed within tolerance (Alice:
+  20/20/30, Bob: 80/80/70) -- the contract settled `CONVERGED` with a
+  genuinely unequal, evidenced **20% / 80%** split, every stored
+  justification's excerpt verified against the real submitted text, and
+  `pay_out()` moved the contract to `PAID`. `recompute_settlement()`,
+  called against this live deployed contract, matched `settled_split_bp`
+  on-chain exactly.
 
-**Earlier deploys -- pre-fix contract (superseded, kept here for the
-NO_CONSENSUS evidence they still validly demonstrate -- the settlement-
-derivation bug they predate did not affect convergence/tolerance behavior,
-only which stored field the paid split was derived from):**
+**Superseded -- post single-source-of-truth fix only, pre validator
+rounds-comparison fix -- `0x050baF2ca5E0Be18B8e0923AE89cB809f5eF642C`:**
+
+- **Unequal, evidenced case**, reconfirmed live on this intermediate
+  version. All 3 samples agreed exactly (Alice 15/15/15, Bob 85/85/85);
+  converged at **15% / 85%**; `recompute_settlement()` matched
+  `settled_split_bp` on-chain.
+
+**Superseded -- original, pre-fix contract (kept here for the
+NO_CONSENSUS evidence they still validly demonstrate -- neither
+settlement-derivation bug affected convergence/tolerance behavior, only
+which field the paid split was actually derived from/validated against):**
 
 - **Unequal, evidenced case** (first attempt, pre-fix). Same evidence as
   above; converged at Alice 15/20/15, Bob 85/80/85 -- 15%/85%.
@@ -333,10 +349,11 @@ below for the full analysis of why three qualitatively different kinds of
 ambiguous evidence all converged with zero measured sample spread, and what
 that does and doesn't imply about the tolerance band. All four of these
 findings are about the contract's convergence/tolerance/consensus behavior,
-which the single-source-of-truth fix did not change (it only changed which
-stored field the paid split derives from, not how or when the contract
-decides `CONVERGED` vs `NO_CONSENSUS`) -- so they continue to apply to the
-current, fixed contract without needing to be independently re-run.
+which neither settlement/validator fix changed (they changed which field
+the paid split derives from and which field the network validates it
+against, not how or when the contract decides `CONVERGED` vs
+`NO_CONSENSUS`) -- so they continue to apply to the current, fully
+corrected contract without needing to be independently re-run.
 
 Run `pytest tests/direct -v` and `gltest tests/integration -v -s --network
 studionet` yourself to see current output; this section reflects the runs
@@ -455,6 +472,130 @@ adversarial value under test -- see
 this specific mechanism than a live attempt could be, precisely because it
 can guarantee the forgery is actually attempted rather than hope a live
 model produces one.
+
+## Adversarial hardening: validator rounds-comparison gap
+
+A second, related gap was found through the same adversarial-testing
+discipline, this time in `validator_fn` itself rather than in what
+`start_estimation` did with a leader's result. Reported here with the same
+honesty as the first: it was real, it was proven with a real failing
+assertion before being fixed, and it was fixed the same way Concord's
+equivalent gap was closed on resubmission -- not redesigned in the
+abstract, but adversarially tested until the fix actually held.
+
+**The gap.** After the single-source-of-truth fix above, `start_estimation`
+correctly derived the paid split from `result["rounds"]` via
+`_settle_from_rounds` -- never from `result["split_pct"]`. But
+`validator_fn`, the function that decides whether the network accepts or
+rejects a leader's result in the first place, still only compared
+`leader_data["outcome"]` and `leader_data["split_pct"]` against the
+validator's own independently-computed values. It never looked at
+`leader_data["rounds"]` at all. That meant the network's actual
+accept/reject gate was checking a field (`split_pct`) that no longer
+determined payment, while the field that DID determine payment (`rounds`)
+went completely unchecked by consensus. A byzantine leader could report a
+`split_pct` that matched what an honest validator would independently
+compute -- passing the outer tolerance check -- while shipping fabricated
+`rounds` data that `_settle_from_rounds` would derive into a materially
+different, self-serving actual payout.
+
+**How it was proven, not just reasoned about.**
+`tests/direct/test_validator_rounds_gap.py` constructs exactly this
+scenario: a leader claims `split_pct={alice: 20, bob: 80}` (which an
+honest validator's own recomputation also independently lands on) while
+shipping `rounds` that actually derive to `{alice: 90, bob: 10}`. Run
+against the pre-fix `validator_fn`, `direct_vm.run_validator()` -- which
+replays the real captured `validator_fn` against these exact values --
+returned `True`: **the byzantine leader was accepted**, despite the
+validator's own honest recomputation deriving a completely different
+payout (20/80) than what the leader's `rounds` would actually pay (90/10).
+That is a real, confirmed acceptance of a result the validator's own
+independent work disagreed with -- not a hypothetical.
+
+**The fix.** `validator_fn` now derives its own accept/reject decision
+from `_settle_from_rounds` applied to **both** sides' `rounds` -- the
+leader's claimed `rounds` and the validator's own independently-recomputed
+`rounds` -- and compares those derived outcomes/splits, in basis points,
+within the same tolerance band. It no longer reads `split_pct` at all. Run
+against the fixed code, the exact same adversarial scenario is now
+correctly rejected (`accepted is False`), and a companion test confirms an
+honest leader whose `rounds` genuinely agree with the validator's own is
+still correctly accepted -- the fix closes the gap without becoming overly
+strict. `validator_fn` now checks precisely the same thing
+`start_estimation` and `recompute_settlement` do: what `_settle_from_rounds`
+derives from the raw `rounds` data, and nothing else.
+
+### Smaller nits: what was checked, fixed, and left alone
+
+Three smaller items were raised alongside the main gap. Reported honestly,
+including the one left unchanged:
+
+- **Integer-division dust in `_distribute`.** `(pool * bp) // 10000` per
+  contributor can lose a few units of `pool` to floor-division rounding
+  even though `settled_split_bp` values sum to exactly 10000 -- e.g. a
+  3-wei pool split 6700/3300 bp floors to `2 + 0 = 2`, stranding 1 wei in
+  the contract forever. **Fixed**: extracted as the pure, unit-tested
+  `_compute_payout_amounts()` (see
+  `tests/direct/test_pure_logic.py::test_compute_payout_amounts_*`), which
+  pays any such dust to whichever contributor holds the largest bp share,
+  the same largest-remainder idea `_normalize_to_bp` already uses. `sum(amounts) == pool`
+  is now asserted directly, not just assumed.
+- **The 60-140 allowed band for a sample's reported total.** This was a
+  leftover, not a deliberate choice -- there was no comment explaining why
+  ±40 around 100 rather than something tighter, and `_normalize_to_bp`
+  rescales proportionally regardless of the total anyway, so correctness
+  never depended on this number. **Fixed**: tightened to 90-110 (±10) and
+  documented in-line why: with whole-integer percentages and at most
+  `MAX_CONTRIBUTORS = 8` contributors, honest rounding drift is at most a
+  few points, so a total outside ±10 is a real sign of a broken response,
+  not benign slop -- catching more genuinely-broken LLM responses before
+  they get silently rescaled into something that looks plausible but
+  isn't what the model meant.
+- **`MIN_CITATION_LEN = 8` -- is it easily gameable?** Checked and
+  **deliberately left unchanged**, with the reasoning now documented
+  in-line in `contracts/fairsplit.py`: this length check's only honest job
+  is to reject near-empty matches; it cannot and was never meant to
+  guarantee a citation is *semantically substantive*, only that it's
+  *real* (a verbatim, unforged substring of that contributor's own
+  submission -- the actual ProofReader-lesson property). Any fixed length
+  threshold is trivially satisfiable by an contributor padding their own
+  submission with filler of exactly that length, so raising the number
+  doesn't close that gap -- it only risks rejecting legitimately short,
+  meaningful citations (this contract's own tests use an 11-character
+  "fixed typos" as a real example). Actually closing semantic gaming would
+  require judging meaning, i.e. trusting another LLM call -- reintroducing
+  the exact kind of unverifiable trust this check exists to avoid. Left at
+  8, documented as a boundary of what this mechanism can honestly claim to
+  prove, not silently ignored.
+
+### Redeployed and reconfirmed live after the fix (round 2)
+
+Both the validator rounds-comparison fix and the three nits above changed
+`contracts/fairsplit.py` again, after the address referenced earlier in
+this README (`0x050baF2ca5E0Be18B8e0923AE89cB809f5eF642C`) was already
+deployed and tested. Same discipline as the first fix: redeployed to a
+fresh address and reconfirmed live rather than continuing to point at a
+now-superseded deployment.
+
+**The fully corrected contract is live at:**
+
+```
+0x3A8F50633228632EEfD42562aA5257828cA9FE5C
+```
+
+Driven through the full unequal-split flow live again against this exact
+address: funded, both contributors submitted, `start_estimation()`
+converged (Alice 20/20/30, Bob 80/80/70 -- median 20/80, within tolerance),
+settled at a genuinely unequal, evidenced **20% / 80%** split (the
+specific split number moved slightly between runs, as expected -- see
+[Live NO_CONSENSUS attempts](#live-no_consensus-attempts-an-honest-finding)
+for why repeated live LLM reads aren't bit-identical run to run, even
+though within a single run's 3 samples they usually are), `pay_out()`
+succeeded, and `recompute_settlement()` matched `settled_split_bp` on-chain
+exactly. This is the address that reflects the actual, fully-hardened
+submitted contract -- both the single-source-of-truth fix and the
+validator rounds-comparison fix, plus the three nits above, all live and
+reconfirmed on real GenVM consensus, not just in direct-mode tests.
 
 ## Live NO_CONSENSUS attempts: an honest finding
 
