@@ -1,0 +1,21 @@
+paths:
+  contracts: contracts/
+
+environment: .env
+
+networks:
+  default: studionet
+  studionet:
+    default_wait_interval: 6000
+    default_wait_retries: 60
+    accounts:
+      - "${ACCOUNT_PRIVATE_KEY_OWNER}"
+      - "${ACCOUNT_PRIVATE_KEY_ALICE}"
+      - "${ACCOUNT_PRIVATE_KEY_BOB}"
+      - "${ACCOUNT_PRIVATE_KEY_CAROL}"
+  localnet:
+    accounts:
+      - "${ACCOUNT_PRIVATE_KEY_OWNER}"
+      - "${ACCOUNT_PRIVATE_KEY_ALICE}"
+      - "${ACCOUNT_PRIVATE_KEY_BOB}"
+      - "${ACCOUNT_PRIVATE_KEY_CAROL}"
